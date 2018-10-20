@@ -7,8 +7,10 @@ defmodule Chord do
 
     m = 12
     n = 160 - m
+    
     chordNodes = Enum.map( 1..numNodes, fn(_) ->
-        {:ok, pid} = GenServer.start_link(ChordNode, {[nil, nil], [], [], m})
+        init_state = %{pred: nil, succ: nil, finger_table: [], files: [], m: m}
+        {:ok, pid} = GenServer.start_link(ChordNode, init_state)
         << chordId :: size(m), _ :: size(n) >> = :crypto.hash(:sha, inspect(pid))
         { chordId , pid }
     end)
@@ -36,6 +38,12 @@ defmodule Chord do
         x |> elem(1) |> GenServer.cast({:add_finger_tables, finger_table})
     end)
 
+    # Initializing stabilization loops
+    Enum.map(chordNodes, fn(x) ->
+        x |> elem(1) |> Process.send_after({:stabilize}, elem(x,0))
+        x |> elem(1) |> Process.send_after({:fix_fingers, 0}, elem(x,0))
+    end)
+    
     chordNodes
   end
 
@@ -43,6 +51,12 @@ defmodule Chord do
     randomNode = Enum.random(chordNodes)
     IO.inspect(randomNode)
     randomNode |> elem(1) |> GenServer.cast({:add_file, msg})
+  end
+
+  def findmsg(chordNodes, msg) do
+    randomNode = Enum.random(chordNodes)
+    IO.inspect(randomNode)
+    randomNode |> elem(1) |> GenServer.cast({:search_file, msg})
   end
 
 end
