@@ -5,7 +5,7 @@ defmodule Chord do
 
   def main(numNodes, numRequests) do
 
-    m = 12
+    m = 15
     n = 160 - m
     
     chordNodes = Enum.map( 1..numNodes, fn(_) ->
@@ -42,21 +42,19 @@ defmodule Chord do
     Enum.map(chordNodes, fn(x) ->
         x |> elem(1) |> Process.send_after({:stabilize}, elem(x,0))
         x |> elem(1) |> Process.send_after({:fix_fingers, 0}, elem(x,0))
+        x |> elem(1) |> Process.send_after({:check_predecessor}, elem(x,0))
     end)
     
     chordNodes
   end
 
-  def sendmsg(chordNodes, msg) do
-    randomNode = Enum.random(chordNodes)
-    IO.inspect(randomNode)
-    randomNode |> elem(1) |> GenServer.cast({:add_file, msg})
-  end
+  def createAndJoin(x) do
+    m = 12
 
-  def findmsg(chordNodes, msg) do
-    randomNode = Enum.random(chordNodes)
-    IO.inspect(randomNode)
-    randomNode |> elem(1) |> GenServer.cast({:search_file, msg})
+    init_state = %{pred: nil, succ: nil, finger_table: [], files: [], m: m}
+    {:ok, pid} = GenServer.start_link(ChordNode, init_state)
+
+    pid |> GenServer.cast( {:join, x} )
   end
 
 end
