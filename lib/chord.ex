@@ -3,9 +3,9 @@ defmodule Chord do
   Documentation for Chord.
   """
 
-  def main(numNodes, numRequests) do
+  def main(numNodes, numRequests, failure_chance) do
 
-    m = 15
+    m = numNodes |> :math.log2 |> :math.ceil |> trunc |> Kernel.+(2)
     n = 160 - m
     r = trunc(:math.log2(numNodes))
     
@@ -48,35 +48,38 @@ defmodule Chord do
   
     :ets.new(:average_hops, [:set, :public, :named_table])
     Enum.each(chordNodes, fn(x) -> 
-        :ets.insert(:average_hops, {x |> elem(0), {0, false}})
+        :ets.insert(:average_hops, {x |> elem(0), {[], false}})
     end)
 
     Enum.map(chordNodes, fn(x) ->
-        x |> elem(1) |> send({:start_search_requests,numRequests})
+        x |> elem(1) |> Process.send_after({:start_search_requests,numRequests, failure_chance}, 10000)
     end)
 
-    checkConvergence(chordNodes, numNodes*numRequests)
+    checkConvergence(chordNodes, numNodes, numNodes*numRequests)
     
   end
 
-  def checkConvergence(chordNodes, totalRequests) do
-    {sum, done} = Enum.reduce(chordNodes, {0,true}, fn(x, {hops,done})-> 
+  def checkConvergence(chordNodes, numNodes, totalRequests) do
+    {hops, done, failed} = Enum.reduce(chordNodes, {[],true,0}, fn(x, {hops,done, failed})-> 
                     [{_,{node_hops,value}}] = :ets.lookup(:average_hops, x |> elem(0))
-                    {hops+node_hops,done && value}
+                    {value, failed} = if value == nil, do: {true, failed+1}, else: {value, failed}
+                    {hops++node_hops,done && value, failed}
                 end)
-
+    
     if done do
-        IO.puts("Average Hops:#{sum/totalRequests}")
+        trim = trunc(10*totalRequests/100)
+        hops = hops |> Enum.sort |> Enum.take(trim-totalRequests) |> Enum.take(totalRequests-2*trim)
+        sum = Enum.reduce(hops, 0, fn(x, acc) -> acc+x end)
+        IO.puts("Average Hops:#{sum/(totalRequests-2*trim)}, % of Nodes Failed:#{(failed/numNodes)*100}")
         Process.exit(self(),:kill)
     else
         :timer.sleep(1000)
-        checkConvergence(chordNodes, totalRequests)
+        checkConvergence(chordNodes, numNodes, totalRequests)
     end
   end
 
 
-  def createAndJoin(x) do
-    m = 12
+  def createAndJoin(x, m) do
 
     init_state = %{pred: nil, succ: nil, finger_table: [], files: [], m: m}
     {:ok, pid} = GenServer.start_link(ChordNode, init_state)

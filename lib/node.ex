@@ -16,7 +16,9 @@ defmodule ChordNode do
         {:reply, pred, state}
     end
 
-    def handle_call( :get_successor_list, _, %{succList: succList} = state ) do
+    def handle_call( :get_successor_list, _, %{succ: succ, succList: succList} = state ) do
+        succList = if (succList == []), do: [succ], else: succList
+        Map.put(state, :succList, succList)
         {:reply, succList, state}
     end
 
@@ -25,7 +27,7 @@ defmodule ChordNode do
             xid = x |> elem(0)
             acc = 
                 if(acc == nil) do
-                    if( (myId < xid && xid < id) || (myId > id && (xid > myId || xid < id)) ) do
+                    if( x_between_a_and_b?(xid, myId, id) ) do
                         x
                     end
                 else
@@ -53,7 +55,11 @@ defmodule ChordNode do
             succ
         else
             x = succ |> elem(1) |> GenServer.call( {:closest_preceding_node, id} )
-            x |> elem(1) |> GenServer.call( {:find_successor, id} )
+            if x |> elem(1) |> Process.alive? do
+                x |> elem(1) |> GenServer.call( {:find_successor, id} )
+            else
+                succ
+            end
         end
         requestedNode
     end
@@ -104,7 +110,7 @@ defmodule ChordNode do
     def handle_cast({:add_key, {_, hops}}, %{myId: myId} = state) do
         
         [{_,{existing_hops,done}}] = :ets.lookup(:average_hops, myId)
-        :ets.insert(:average_hops, {myId, {existing_hops+hops,done}})
+        :ets.insert(:average_hops, {myId, {existing_hops++[hops],done}})
 
         {:noreply, state}
     end
@@ -128,16 +134,22 @@ defmodule ChordNode do
 
     def handle_info( {:fix_fingers, next}, %{succ: succ, succList: succList, finger_table: finger_table, myId: myId, m: m} = state) do
         
+        state = 
+        try do
+            finger_table = 
         finger_table = 
-            if(length(finger_table) >= m) do
-                nextId = rem( trunc(myId + :math.pow(2, next)), trunc(:math.pow(2, m)) )
-                List.replace_at( finger_table, next, find_successor(nextId, succ, succList, myId) )
-            else
-                nextId = rem( trunc(myId + :math.pow(2, next)), trunc(:math.pow(2, m)) )
-                List.insert_at( finger_table, next, find_successor(nextId, succ, succList, myId) )
-            end
-        state = Map.put(state, :finger_table, finger_table)
-        
+            finger_table = 
+                if(length(finger_table) >= m) do
+                    nextId = rem( trunc(myId + :math.pow(2, next)), trunc(:math.pow(2, m)) )
+                    List.replace_at( finger_table, next, find_successor(nextId, succ, succList, myId) )
+                else
+                    nextId = rem( trunc(myId + :math.pow(2, next)), trunc(:math.pow(2, m)) )
+                    List.insert_at( finger_table, next, find_successor(nextId, succ, succList, myId) )
+                end
+            Map.put(state, :finger_table, finger_table)
+        catch
+            :exit, _ -> state
+        end
         next = next + 1
         next = if (next>m-1), do: 0, else: next
         schedule_work({:fix_fingers, next})
@@ -146,6 +158,7 @@ defmodule ChordNode do
     end
     
     def handle_info( {:stabilize}, %{succ: succ,succList: succList, myId: myId, r: r} = state) do
+
         succ = if (succ |> elem(1) |> Process.alive?), do: succ, else: get_next_alive_successor(succList)
         pred =
         try do
@@ -153,7 +166,9 @@ defmodule ChordNode do
         catch
             :exit, _ -> {myId, self()}
         end 
-        predId = pred |> elem(0)
+        
+        predId = if (pred == nil), do: myId, else: pred |> elem(0)
+        succ = if (succ |> elem(1) |> Process.alive?), do: succ, else: get_next_alive_successor(succList)
         succId = succ |> elem(0)
         state = 
         if( (predId > myId && predId < succId) || (myId > succId && (predId > myId || predId < succId)) ) do
@@ -163,16 +178,20 @@ defmodule ChordNode do
         end
         succ = state.succ
         succ |> elem(1) |> GenServer.cast( {:notify, {myId, self()}} )
-        newList = succ |> elem(1) |> GenServer.call(:get_successor_list)
         
-        newList = List.insert_at(newList, 0, succ)
-        newList = 
-            if(length(newList)>r) do
-                Enum.take(newList, r)
-            else
-                newList
+        newSuccList = 
+            try do
+                newSuccList = succ |> elem(1) |> GenServer.call(:get_successor_list) |> List.insert_at(0, succ)
+                if(length(newSuccList)>r) do
+                    Enum.take(newSuccList, r)
+                else
+                    newSuccList
+                end
+            catch
+                :exit, _ -> succList
             end
-        state = Map.put(state, :succList, newList)    
+
+        state = Map.put(state, :succList, newSuccList)    
         schedule_work({:stabilize})
         {:noreply, state}
     end
@@ -195,14 +214,22 @@ defmodule ChordNode do
     @doc """
     Search Request Loop - For benchmarking
     """
-    def handle_info( {:start_search_requests, numRequests},
+    def handle_info( {:start_search_requests, numRequests, failure_chance},
                  %{succ: succ, succList: succList, finger_table: finger_table, myId: myId, m: m} = state ) do
+
+        # Adding Failure chance of 0.5%
+        [{_,{hops,_}}] = :ets.lookup(:average_hops,myId)
+        if(:rand.uniform(1000) <= failure_chance*10 && hops == []) do
+            [{_,{hops,_}}] = :ets.lookup(:average_hops,myId)
+            :ets.insert(:average_hops,{myId, {hops,nil}})
+            Process.exit(self(), :normal)
+        end
 
         key = :math.pow(2, m) |> trunc |> :rand.uniform
 
         search_key({key, 0}, succ, succList, finger_table, myId)
         if(numRequests>1) do
-            schedule_search_requests(numRequests-1)
+            schedule_search_requests(numRequests-1, failure_chance)
         else
             [{_,{hops,_}}] = :ets.lookup(:average_hops,myId)
             :ets.insert(:average_hops,{myId, {hops,true}})
@@ -242,11 +269,17 @@ defmodule ChordNode do
         end)
     end
 
-    defp schedule_work(msg) do
-        Process.send_after(self(), msg, 2000)
+    # Checks if x lies between a & b including checking for the wraparound
+    defp x_between_a_and_b?(x, a, b) do
+        (a < x && x < b) || (a > b && (x > a || x < b)) 
     end
 
-    defp schedule_search_requests(numRequests) do
-        Process.send_after(self(), {:start_search_requests, numRequests}, 1000)
+    defp schedule_work(msg) do
+        Process.send_after(self(), msg, 1000)
+    end
+
+    defp schedule_search_requests(numRequests, failure_chance) do
+        IO.puts("Search Loop Started")
+        Process.send_after(self(), {:start_search_requests, numRequests, failure_chance}, 2000)
     end
 end
