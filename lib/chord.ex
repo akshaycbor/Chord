@@ -7,9 +7,10 @@ defmodule Chord do
 
     m = 15
     n = 160 - m
+    r = trunc(:math.log2(numNodes))
     
     chordNodes = Enum.map( 1..numNodes, fn(_) ->
-        init_state = %{pred: nil, succ: nil, finger_table: [], files: [], m: m}
+        init_state = %{pred: nil, succ: nil, finger_table: [], files: [], m: m, r: r}
         {:ok, pid} = GenServer.start_link(ChordNode, init_state)
         << chordId :: size(m), _ :: size(n) >> = :crypto.hash(:sha, inspect(pid))
         { chordId , pid }
@@ -44,9 +45,35 @@ defmodule Chord do
         x |> elem(1) |> Process.send_after({:fix_fingers, 0}, elem(x,0))
         x |> elem(1) |> Process.send_after({:check_predecessor}, elem(x,0))
     end)
+  
+    :ets.new(:average_hops, [:set, :public, :named_table])
+    Enum.each(chordNodes, fn(x) -> 
+        :ets.insert(:average_hops, {x |> elem(0), {0, false}})
+    end)
+
+    Enum.map(chordNodes, fn(x) ->
+        x |> elem(1) |> send({:start_search_requests,numRequests})
+    end)
+
+    checkConvergence(chordNodes, numNodes*numRequests)
     
-    chordNodes
   end
+
+  def checkConvergence(chordNodes, totalRequests) do
+    {sum, done} = Enum.reduce(chordNodes, {0,true}, fn(x, {hops,done})-> 
+                    [{_,{node_hops,value}}] = :ets.lookup(:average_hops, x |> elem(0))
+                    {hops+node_hops,done && value}
+                end)
+
+    if done do
+        IO.puts("Average Hops:#{sum/totalRequests}")
+        Process.exit(self(),:kill)
+    else
+        :timer.sleep(1000)
+        checkConvergence(chordNodes, totalRequests)
+    end
+  end
+
 
   def createAndJoin(x) do
     m = 12

@@ -16,6 +16,10 @@ defmodule ChordNode do
         {:reply, pred, state}
     end
 
+    def handle_call( :get_successor_list, _, %{succList: succList} = state ) do
+        {:reply, succList, state}
+    end
+
     def handle_call( {:closest_preceding_node, id}, _, %{finger_table: finger_table, myId: myId} = state ) do
         preceding_node = Enum.reduce( Enum.reverse(finger_table), nil, fn(x, acc) -> 
             xid = x |> elem(0)
@@ -77,7 +81,6 @@ defmodule ChordNode do
     def handle_cast( {:join, n}, %{myId: myId} = state ) do
         pred = nil
         succ = n |> elem(1) |> GenServer.call( {:find_successor, myId} )
-        IO.inspect(succ)
         state = Map.put(state, :succ, succ)
         state = Map.put(state, :pred, pred)
 
@@ -98,9 +101,11 @@ defmodule ChordNode do
         {:noreply, state}
     end
 
-    def handle_cast({:add_key, {key, hops}}, state) do
-        IO.inspect(self())
-        IO.puts("#{key} found! within #{hops} hops")
+    def handle_cast({:add_key, {_, hops}}, %{myId: myId} = state) do
+        
+        [{_,{existing_hops,done}}] = :ets.lookup(:average_hops, myId)
+        :ets.insert(:average_hops, {myId, {existing_hops+hops,done}})
+
         {:noreply, state}
     end
 
@@ -112,9 +117,6 @@ defmodule ChordNode do
         else
             predId = pred |> elem(0)
             if( (nodeId < myId && predId < nodeId) || (myId < predId && (nodeId>predId || nodeId<myId)) ) do
-                if(myId==362) do
-                    IO.puts("Received request from #{nodeId}")
-                end
                 Map.put(state, :pred, {nodeId, node})
             else
                 state
@@ -143,8 +145,14 @@ defmodule ChordNode do
         {:noreply, state}
     end
     
-    def handle_info( {:stabilize}, %{succ: succ, myId: myId} = state) do
-        pred = succ |> elem(1) |> GenServer.call(:get_predecessor)
+    def handle_info( {:stabilize}, %{succ: succ,succList: succList, myId: myId, r: r} = state) do
+        succ = if (succ |> elem(1) |> Process.alive?), do: succ, else: get_next_alive_successor(succList)
+        pred =
+        try do
+            succ |> elem(1) |> GenServer.call(:get_predecessor)
+        catch
+            :exit, _ -> {myId, self()}
+        end 
         predId = pred |> elem(0)
         succId = succ |> elem(0)
         state = 
@@ -155,6 +163,16 @@ defmodule ChordNode do
         end
         succ = state.succ
         succ |> elem(1) |> GenServer.cast( {:notify, {myId, self()}} )
+        newList = succ |> elem(1) |> GenServer.call(:get_successor_list)
+        
+        newList = List.insert_at(newList, 0, succ)
+        newList = 
+            if(length(newList)>r) do
+                Enum.take(newList, r)
+            else
+                newList
+            end
+        state = Map.put(state, :succList, newList)    
         schedule_work({:stabilize})
         {:noreply, state}
     end
@@ -183,9 +201,13 @@ defmodule ChordNode do
         key = :math.pow(2, m) |> trunc |> :rand.uniform
 
         search_key({key, 0}, succ, succList, finger_table, myId)
-        if(numRequests>=1) do
+        if(numRequests>1) do
             schedule_search_requests(numRequests-1)
+        else
+            [{_,{hops,_}}] = :ets.lookup(:average_hops,myId)
+            :ets.insert(:average_hops,{myId, {hops,true}})
         end
+
 
         {:noreply, state}
     end
@@ -221,7 +243,7 @@ defmodule ChordNode do
     end
 
     defp schedule_work(msg) do
-        Process.send_after(self(), msg, 200)
+        Process.send_after(self(), msg, 2000)
     end
 
     defp schedule_search_requests(numRequests) do
